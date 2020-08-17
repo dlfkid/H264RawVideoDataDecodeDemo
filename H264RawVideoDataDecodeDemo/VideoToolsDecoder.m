@@ -188,6 +188,42 @@ static void decompressionOutputCallback(void * CM_NULLABLE decompressionOutputRe
     return isAppResignActive;
 }
 
+- (void)appendVideoBuffer:(uint8_t *)buffer length:(NSUInteger)length {
+    for (NSUInteger i = 0; i < length; i++) {
+        if (memcmp(buffer + i, kBufferPrefix, kNALUPrefixLength) == 0) {
+            size_t offset = MIN(i+kNALUPrefixLength, length - 1);
+            NALUType nalu = buffer[offset] & kNALURestoreBuffer;
+            switch (nalu) {
+                case NALUTypeCodedSlice:/// 如果是 P 帧, 那么整个包都是 P 帧数据.
+                    _idrData = [NSData dataWithBytesNoCopy:buffer length:length freeWhenDone:NO];
+                    break;
+                case NALUTypeSPS: {
+                    NSUInteger tempLength = [self calculateDataLength:offset length:length buffer:buffer];
+                    _spsData = [NSData dataWithBytes:&buffer[offset] length:tempLength];
+              }
+                    break;
+                case NALUTypePPS: {
+                    NSUInteger tempLength = [self calculateDataLength:offset length:length buffer:buffer];
+                    _ppsData = [NSData dataWithBytes:&buffer[offset] length:tempLength];
+              }
+                    break;
+                case NALUTypeSEI: {
+                    NSUInteger tempLength = [self calculateDataLength:offset length:length buffer:buffer];
+                    _seiData = [NSData dataWithBytes:&buffer[offset] length:tempLength];
+              }
+                    break;
+                case NALUTypeIDR:
+                    _idrData = [NSData dataWithBytesNoCopy:&buffer[offset - kNALUPrefixLength] length:length - offset + kNALUPrefixLength freeWhenDone:NO];
+                    break;
+              
+                default:
+                    return;
+                    break;
+              }
+        }
+    }
+}
+
 /// 将传过来的数据流格式化成可以被CoreMedia识别的数据
 /// @param buffer 原始数据
 /// @param length 长度
@@ -212,68 +248,30 @@ static void decompressionOutputCallback(void * CM_NULLABLE decompressionOutputRe
     /// 5. 解码回调 `CVImageBufferRef` 对象.
     OSStatus status = noErr;
     /// 如果第一个 NALU 是 SPS 类型, 我们需要找出后面跟着的 PPS 和 IDR.
-    if (naluType == NALUTypeSPS) { // 取到了I帧开头的NALU类型
-        for (NSUInteger i = 0; i < length; i++) {
-            if (memcmp(buffer + i, kBufferPrefix, kNALUPrefixLength) == 0) {
-                size_t offset = MIN(i+kNALUPrefixLength, length - 1);
-                NALUType nalu = buffer[offset] & kNALURestoreBuffer;
-                switch (nalu) {
-                    case NALUTypeCodedSlice:/// 如果是 P 帧, 那么整个包都是 P 帧数据.
-                        _idrData = [NSData dataWithBytesNoCopy:buffer length:length freeWhenDone:NO];
-                        break;
-                    case NALUTypeSPS: {
-                        NSUInteger tempLength = [self calculateDataLength:offset length:length buffer:buffer];
-                        _spsData = [NSData dataWithBytes:&buffer[offset] length:tempLength];
-                  }
-                        break;
-                    case NALUTypePPS: {
-                        NSUInteger tempLength = [self calculateDataLength:offset length:length buffer:buffer];
-                        _ppsData = [NSData dataWithBytes:&buffer[offset] length:tempLength];
-                  }
-                        break;
-                    case NALUTypeSEI: {
-                        NSUInteger tempLength = [self calculateDataLength:offset length:length buffer:buffer];
-                        _seiData = [NSData dataWithBytes:&buffer[offset] length:tempLength];
-                  }
-                        break;
-                    case NALUTypeIDR:
-                        _idrData = [NSData dataWithBytesNoCopy:&buffer[offset - kNALUPrefixLength] length:length - offset + kNALUPrefixLength freeWhenDone:NO];
-                        break;
-                  
-                    default:
-                        NSAssert(NO, @"未识别的Nalu类型: %hhud", nalu);
-                        break;
-                  }
-            }
-        }
-        
+    if (naluType == NALUTypeSPS) {
+        // 取到了I帧开头的NALU类型
+        // 遍历解析数据, 将数据流切分添加到对应的位置
+        [self appendVideoBuffer:buffer length:length];
         /// 如果我们没有得到格式数据, 输出视频数据方便 Debug.
         if (!_spsData || !_ppsData) {
-            NSMutableString *string  = [NSMutableString string];
-            for (NSUInteger i = 0; i < 30; i++) {
-                [string appendFormat:@"%02X", buffer[i]];
-            }
-            NSLog(@"I帧数据不全 spsData is %@, ppsData is %@, header is %@", _spsData, _ppsData, string);
+            // 如果切分后没有取得数据需要返回
             return NULL;
         }
-        
         /// 检查格式是否有变化(例如码流等参数变了), 如果有变化需要重新创建 `VTDecompressionSessionRef`.
-        
         NSUInteger naluChanges = 0; // 检查SPS和PPS是否变化
-        
         NSUInteger const parameterCount = 2;
-        
         const uint8_t * const parameterSetPointers[parameterCount] = {[_spsData bytes], [_ppsData bytes]};
         const size_t parameterSetSizes[parameterCount] = {_spsData.length, _ppsData.length};
         
         for (int i = 0; _formatDescription && i < parameterCount; i++) {
             size_t oldLength = 0;
             const uint8_t *oldData = NULL;
+            // 获取原有的视频格式描述
             status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(_formatDescription, i, &oldData, &oldLength, NULL, NULL);
             
             if (status != noErr) {
                 _formatDescription = NULL;
-                NSLog(@"无法获取视频格式描述: %d", (int)status);
+                // 无法获取视频格式描述
                 return NULL;
             }
             
@@ -290,7 +288,7 @@ static void decompressionOutputCallback(void * CM_NULLABLE decompressionOutputRe
             status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(_formatDescription, 0, &oldSPSData, &oldSPSLength, NULL, NULL); // 将刚才得到的SPS信息生成格式描述
             if (status != noErr) {
                 _formatDescription = NULL;
-                NSLog(@"无法获取视频SPS格式描述: %d", (int)status);
+                // 无法获取视频SPS格式描述
                 return NULL;
             }
             // 和上一帧的SPS进行对比，检查码流格式是否变化
@@ -303,21 +301,18 @@ static void decompressionOutputCallback(void * CM_NULLABLE decompressionOutputRe
 
                 if (noErr != status) {
                     _formatDescription = NULL;
-                    NSLog(@"无法获取视频PPS格式描述: %d", (int)status);
+                    // 无法获取视频PPS格式描述
                     return NULL;
               }
 
               isVideoFormatChanged = ((0 != memcmp([_ppsData bytes], oldPPSData, oldPPSLength)) || oldPPSLength != _ppsData.length);
-            } else {
-                NSLog(@"视频码流格式发生变化");
             }
         }
         if (!_decompressionSession || isVideoFormatChanged) { // 没有解压Session或视频码流格式已经变化
-            NSLog(@"生成新的格式描述");
             // 生成用于H264的格式描述
             status = CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, parameterCount, parameterSetPointers, parameterSetSizes, kNALUPrefixLength, &_formatDescription);
             if (status != noErr) {
-                NSLog(@"生成视频码流格式描述失败: %d", (int)status);
+                // 生成视频码流格式描述失败
                 _formatDescription = NULL;
                 return NULL;
             }
