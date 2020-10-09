@@ -53,6 +53,8 @@
 - (NSData *)sampleDataFromBundle {
     NSBundle *mainBundle = [NSBundle mainBundle];
     NSString *path = [mainBundle pathForResource:@"camer" ofType:@"h264"];
+    NSError *permissionError = nil;
+    [[NSFileManager defaultManager] setAttributes:@{NSFileProtectionKey: NSFileProtectionNone} ofItemAtPath:path error:&permissionError];
     NSData *data = [NSData dataWithContentsOfFile:path];
     return data;
 }
@@ -91,7 +93,7 @@
                 }
                 NSData *dd = [NSData dataWithBytes:&buffer[bufferBegin] length:length];
                 const uint8_t *d = dd.bytes;
-                printf("qweqweqwe: %#hhx, length: %zu, index: %zu\n", d[4], length, bufferBegin);
+                printf("FrameInfo: %#hhx, length: %zu, index: %zu\n", d[4], length, bufferBegin);
                 [self.videoDecoder decodeVideoFrameImageWithBuffer:(uint8_t *)[dd bytes] ReadSize:length];
                 fn++;
                 bufferBegin+=length;

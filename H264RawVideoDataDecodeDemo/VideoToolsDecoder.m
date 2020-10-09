@@ -99,26 +99,32 @@ static void decompressionOutputCallback(void * CM_NULLABLE decompressionOutputRe
         [self.frameData appendBytes:imageBuffer length:readSize];
     }
     
-    //判断SPS时是否带了IDR
-    if (naluType == NALUTypeSPS) {
-        @autoreleasepool {
-            NSData *tempData = [NSData dataWithBytes:imageBuffer length:readSize];
-            NSRange range = [tempData rangeOfData:[NSData dataWithBytes:kBufferPrefix length:kNALUPrefixLength] options:NSDataSearchBackwards range:NSMakeRange(0, tempData.length)];
-            if (range.location != NSNotFound) {
-                tempData = [tempData subdataWithRange:NSMakeRange(range.location + range.length, 1)];
-                uint8_t *tempBufferPrefix = (uint8_t *)[tempData bytes];
-                NALUType tempNaluType = tempBufferPrefix[0] & kNALURestoreBuffer;
-                //从后查询如果包含idr则认为是一个完整包
-                if (tempNaluType == NALUTypeIDR) {
-                    naluType = NALUTypeIDR;
-                }
-            }
-        }
-    }
+    // 判断SPS时是否粘连了IDR数据
+    naluType = [self extractNALUSlice:naluType imageBuffer:imageBuffer readSize:readSize];
     return [self initalizeSmapleBufferAndDecompressionSessionWithNALUType:naluType buffer:imageBuffer size:readSize];
 }
 
 #pragma mark - Private
+
+- (NALUType)extractNALUSlice:(NALUType)rawType imageBuffer:(uint8_t *)imageBuffer readSize:(NSUInteger)readSize {
+    if (rawType != NALUTypeSPS) {
+        return rawType;
+    }
+    @autoreleasepool {
+        NSData *tempData = [NSData dataWithBytes:imageBuffer length:readSize];
+        NSRange range = [tempData rangeOfData:[NSData dataWithBytes:kBufferPrefix length:kNALUPrefixLength] options:NSDataSearchBackwards range:NSMakeRange(0, tempData.length)];
+        if (range.location != NSNotFound) {
+            tempData = [tempData subdataWithRange:NSMakeRange(range.location + range.length, 1)];
+            uint8_t *tempBufferPrefix = (uint8_t *)[tempData bytes];
+            NALUType tempNaluType = tempBufferPrefix[0] & kNALURestoreBuffer;
+            //从后查询如果包含idr则认为是一个完整包
+            if (tempNaluType == NALUTypeIDR) {
+                return NALUTypeIDR;
+            }
+        }
+        return rawType;
+    }
+}
 
 - (BOOL)initalizeSmapleBufferAndDecompressionSessionWithNALUType:(NALUType)type buffer:(uint8_t *)buffer size:(NSUInteger)size {
     if (type == NALUTypeIDR || type == NALUTypeCodedSlice) {
